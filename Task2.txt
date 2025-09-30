@@ -1,0 +1,174 @@
+import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from sklearn.metrics import confusion_matrix, classification_report
+import itertools
+
+SEED = 42
+os.environ['PYTHONHASHSEED'] = str(SEED)
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+BATCH_SIZE = 64
+IMG_SIZE = (32, 32)
+NUM_CLASSES = 10
+EPOCHS = 25
+MODEL_SAVE_PATH = "codtech_task2_model.h5"
+PLOTS_DIR = "codtech_task2_plots"
+os.makedirs(PLOTS_DIR, exist_ok=True)
+
+(x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
+y_train = y_train.flatten()
+y_test = y_test.flatten()
+
+VAL_SPLIT = 0.1
+num_val = int(len(x_train) * VAL_SPLIT)
+x_val = x_train[:num_val]
+y_val = y_train[:num_val]
+x_train = x_train[num_val:]
+y_train = y_train[num_val:]
+
+def preprocess_images(x):
+    x = x.astype("float32") / 255.0
+    return x
+
+x_train = preprocess_images(x_train)
+x_val = preprocess_images(x_val)
+x_test = preprocess_images(x_test)
+
+data_augmentation = keras.Sequential([
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.06),
+    layers.RandomZoom(0.08),
+])
+
+base_model = keras.applications.MobileNetV2(
+    input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
+    include_top=False,
+    weights=None
+)
+
+inputs = keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
+x = data_augmentation(inputs)
+x = layers.Conv2D(32, 3, padding="same", activation="relu")(x)
+x = layers.BatchNormalization()(x)
+x = layers.MaxPooling2D()(x)
+x = base_model(x, training=False)
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dropout(0.3)(x)
+x = layers.Dense(128, activation="relu")(x)
+x = layers.BatchNormalization()(x)
+outputs = layers.Dense(NUM_CLASSES, activation="softmax")(x)
+
+model = keras.Model(inputs, outputs)
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"]
+)
+
+checkpoint_cb = keras.callbacks.ModelCheckpoint(
+    MODEL_SAVE_PATH, save_best_only=True, monitor="val_accuracy", mode="max"
+)
+earlystop_cb = keras.callbacks.EarlyStopping(
+    monitor="val_loss", patience=6, restore_best_weights=True
+)
+reduce_lr_cb = keras.callbacks.ReduceLROnPlateau(
+    monitor="val_loss", factor=0.5, patience=3, min_lr=1e-6
+)
+
+history = model.fit(
+    x_train, y_train,
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    validation_data=(x_val, y_val),
+    callbacks=[checkpoint_cb, earlystop_cb, reduce_lr_cb],
+    verbose=2
+)
+
+test_loss, test_acc = model.evaluate(x_test, y_test, verbose=0)
+model.save("codtech_task2_final_model.h5")
+
+def plot_history(history, outdir=PLOTS_DIR):
+    h = history.history
+    epochs = range(1, len(h['loss']) + 1)
+
+    plt.figure(figsize=(8,5))
+    plt.plot(epochs, h['loss'], label='train_loss')
+    plt.plot(epochs, h['val_loss'], label='val_loss')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "loss_plot.png"))
+    plt.close()
+
+    plt.figure(figsize=(8,5))
+    plt.plot(epochs, h['accuracy'], label='train_acc')
+    plt.plot(epochs, h['val_accuracy'], label='val_acc')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, "accuracy_plot.png"))
+    plt.close()
+
+plot_history(history)
+
+y_pred_probs = model.predict(x_test, batch_size=256)
+y_pred = np.argmax(y_pred_probs, axis=1)
+cm = confusion_matrix(y_test, y_pred)
+
+def plot_confusion_matrix(cm, classes, outpath, normalize=False):
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    plt.figure(figsize=(9,8))
+    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes, rotation=45)
+    plt.yticks(tick_marks, classes)
+    fmt = '.2f' if normalize else 'd'
+    thresh = cm.max() / 2.
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        plt.text(j, i, format(cm[i, j], fmt),
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+    plt.tight_layout()
+    plt.savefig(outpath)
+    plt.close()
+
+cifar10_labels = [
+    "airplane", "automobile", "bird", "cat", "deer",
+    "dog", "frog", "horse", "ship", "truck"
+]
+plot_confusion_matrix(cm, cifar10_labels, os.path.join(PLOTS_DIR, "confusion_matrix.png"), normalize=False)
+plot_confusion_matrix(cm, cifar10_labels, os.path.join(PLOTS_DIR, "confusion_matrix_normalized.png"), normalize=True)
+
+def plot_sample_predictions(x, y_true, y_pred, classes, outpath, n=16):
+    idx = np.random.choice(len(x), size=n, replace=False)
+    plt.figure(figsize=(12, 12))
+    for i, k in enumerate(idx):
+        plt.subplot(4, 4, i+1)
+        plt.imshow((x[k] * 255).astype("uint8"))
+        true_label = classes[y_true[k]]
+        pred_label = classes[y_pred[k]]
+        plt.title(f"T:{true_label}\nP:{pred_label}", fontsize=9)
+        plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(outpath)
+    plt.close()
+
+plot_sample_predictions(x_test, y_test, y_pred, cifar10_labels, os.path.join(PLOTS_DIR, "sample_predictions.png"), n=16)
+
+report = classification_report(y_test, y_pred, target_names=cifar10_labels)
+with open(os.path.join(PLOTS_DIR, "classification_report.txt"), "w") as f:
+    f.write(f"Test accuracy: {test_acc:.4f}\n")
+    f.write(f"Test loss: {test_loss:.4f}\n\n")
+    f.write(report)
+
+print(test_acc, test_loss, datetime.now().isoformat())
